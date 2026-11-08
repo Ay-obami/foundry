@@ -27,7 +27,7 @@ use alloy_rpc_types::{
     Authorization, BlockId, BlockNumberOrTag, EIP1186AccountProofResponse, TransactionRequest,
     anvil::Forking,
     trace::{
-        geth::{GethDebugTracingOptions, GethTrace},
+        geth::{CallConfig, GethDebugTracingOptions, GethTrace, TraceResult},
         parity::Action,
     },
 };
@@ -8646,6 +8646,51 @@ async fn tempo_consensus_fork_infers_epoch_length_from_chain_config() {
             }
             Err(expected) => assert_eq!(result.err().unwrap().to_string(), expected),
         }
+    }
+}
+
+/// Call traces with logs skip the fee token transfers Tempo emits outside any call frame.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tempo_call_tracer_with_logs() {
+    let (api, handle) = spawn(NodeConfig::test_tempo().with_no_mining(true)).await;
+    let provider = handle.http_provider();
+    let sender = handle.dev_accounts().next().unwrap();
+    let recipients = [Address::random(), Address::random()];
+    let mut pending = Vec::new();
+    for recipient in recipients {
+        let request = TransactionRequest::default()
+            .from(sender)
+            .to(PATH_USD)
+            .with_input(IERC20::transferCall { to: recipient, amount: U256::from(1) }.abi_encode());
+        pending.push(provider.send_transaction(WithOtherFields::new(request)).await.unwrap());
+    }
+    api.mine_one().await.unwrap();
+
+    let options = GethDebugTracingOptions::call_tracer(CallConfig::default().with_log());
+    let check = |trace: GethTrace, recipient: Address| {
+        let GethTrace::CallTracer(frame) = trace else { panic!("expected call trace") };
+        assert_eq!(frame.to, Some(PATH_USD));
+        assert_eq!(frame.logs.len(), 1);
+        assert_eq!(frame.logs[0].address, Some(PATH_USD));
+        assert_eq!(frame.logs[0].topics.as_ref().unwrap()[2], recipient.into_word());
+    };
+    let mut block = None;
+    for (pending, recipient) in pending.into_iter().zip(recipients) {
+        let receipt = pending.get_receipt().await.unwrap();
+        assert!(receipt.status());
+        block = receipt.block_number;
+        let trace = provider
+            .debug_trace_transaction(receipt.transaction_hash, options.clone())
+            .await
+            .unwrap();
+        check(trace, recipient);
+    }
+    let traces =
+        provider.debug_trace_block_by_number(block.unwrap().into(), options).await.unwrap();
+    assert_eq!(traces.len(), 2);
+    for (trace, recipient) in traces.into_iter().zip(recipients) {
+        let TraceResult::Success { result, .. } = trace else { panic!("expected trace") };
+        check(result, recipient);
     }
 }
 

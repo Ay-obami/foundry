@@ -46,6 +46,9 @@ These compatibility differences affect execution, gas reports and Anvil library 
   running frames keep theirs, unlike revm's opcode-level changes. revm also reported 6,000 more
   gas per test after `vm.setEvmVersion("amsterdam")` in `setUp`, even after switching back, because
   its stipend computation kept the EIP-2780 flag set.
+- **Tempo batch traces**: Anvil's trace RPCs show a multi-call Tempo (`0x76`) transaction as its
+  last call, like Tempo nodes, with the logs of earlier calls attached to it. revm-based Anvil
+  showed each call as a child of an empty root call.
 - **Anvil `PrecompileFactory`**: library users must enumerate custom precompiles as
   `(Address, PrecompileId, DynPrecompile)` entries. Anvil no longer exposes `install` for customizing
   the precompile map or adding dynamic address lookup; this is an Anvil API limitation, not a
