@@ -3560,16 +3560,24 @@ Suite result: FAILED. 9 passed; 8 failed; 0 skipped; [ELAPSED]
 "#]]);
 }
 
-// Like revm, a value transfer fails with a revert when the sender is short and with a halt when the
-// recipient balance would overflow, so only the former matches `vm.assumeNoRevert`.
+// Like evm2, a value transfer saturates the recipient balance instead of overflowing, as does a
+// `SELFDESTRUCT` beneficiary, so only a short sender fails the call.
 #[forgetest_init]
-fn symbolic_vm_assume_no_revert_transfer_overflow_halts(prj: _, cmd: _) {
-    skip_unless_z3!("symbolic_vm_assume_no_revert_transfer_overflow_halts");
+fn symbolic_vm_assume_no_revert_transfer_overflow_saturates(prj: _, cmd: _) {
+    skip_unless_z3!("symbolic_vm_assume_no_revert_transfer_overflow_saturates");
 
     prj.add_test(
         "SymbolicTransferOverflow.t.sol",
         r#"
 import "forge-std/Test.sol";
+
+contract SymbolicDestructor {
+    constructor() payable {}
+
+    function destroy(address beneficiary) external {
+        selfdestruct(payable(beneficiary));
+    }
+}
 
 contract SymbolicTransferOverflow is Test {
     address constant DST = address(0x1234);
@@ -3579,17 +3587,29 @@ contract SymbolicTransferOverflow is Test {
         vm.deal(DST, type(uint256).max);
         vm.assumeNoRevert();
         (bool ok, bytes memory data) = DST.call{value: 1}("");
-        assertFalse(ok);
+        assertTrue(ok);
         assertEq(data.length, 0);
+        assertEq(address(this).balance, 1);
+        assertEq(DST.balance, type(uint256).max);
     }
 
     function checkSymbolicValue(uint256 value) public {
         vm.deal(address(this), 2);
         vm.deal(DST, type(uint256).max - 1);
         vm.assumeNoRevert();
-        (bool ok, bytes memory data) = DST.call{value: value}("");
-        assertEq(ok, value < 2);
-        assertEq(data.length == 0, value <= 2);
+        (bool ok,) = DST.call{value: value}("");
+        assertEq(ok, value <= 2);
+        if (ok && value > 0) {
+            assertEq(DST.balance, type(uint256).max);
+        }
+    }
+
+    function checkSelfdestructOverflow() public {
+        vm.deal(address(this), 1);
+        SymbolicDestructor destructor = new SymbolicDestructor{value: 1}();
+        vm.deal(DST, type(uint256).max);
+        destructor.destroy(DST);
+        assertEq(DST.balance, type(uint256).max);
     }
 }
 "#,
@@ -3604,10 +3624,11 @@ contract SymbolicTransferOverflow is Test {
     .success()
     .stdout_eq(str![[r#"
 ...
-Ran 2 tests for test/SymbolicTransferOverflow.t.sol:SymbolicTransferOverflow
+Ran 3 tests for test/SymbolicTransferOverflow.t.sol:SymbolicTransferOverflow
 [PASS] checkOverflow() ([METRICS])
+[PASS] checkSelfdestructOverflow() ([METRICS])
 [PASS] checkSymbolicValue(uint256) ([METRICS])
-Suite result: ok. 2 passed; 0 failed; 0 skipped; [ELAPSED]
+Suite result: ok. 3 passed; 0 failed; 0 skipped; [ELAPSED]
 ...
 "#]]);
 }

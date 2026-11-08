@@ -2206,6 +2206,8 @@ impl SymbolicWorld {
         }
     }
 
+    /// Moves `value` from `from` to `to`, saturating `to`'s balance at `type(uint256).max` like
+    /// evm2's `State::transfer`.
     pub(crate) fn transfer(
         &mut self,
         cx: &mut SymCx,
@@ -2214,13 +2216,42 @@ impl SymbolicWorld {
         to: Address,
         value: SymExpr,
     ) {
+        self.move_balance(cx, executor, from, to, value, true);
+    }
+
+    /// Moves `value` from `from` to the account `created` by CREATE, wrapping its balance like
+    /// evm2's `State::create_account`.
+    pub(crate) fn transfer_to_created(
+        &mut self,
+        cx: &mut SymCx,
+        executor: &ExecutorView<'_>,
+        from: Address,
+        created: Address,
+        value: SymExpr,
+    ) {
+        self.move_balance(cx, executor, from, created, value, false);
+    }
+
+    fn move_balance(
+        &mut self,
+        cx: &mut SymCx,
+        executor: &ExecutorView<'_>,
+        from: Address,
+        to: Address,
+        value: SymExpr,
+        saturate: bool,
+    ) {
         if from == to || value.as_const().is_some_and(|value| value.is_zero()) {
             return;
         }
         let from_balance = self.balance_word_for_address(cx, executor, from);
         let to_balance = self.balance_word_for_address(cx, executor, to);
         let from_balance = SymExpr::binop(cx, SymBinOp::Sub, from_balance, value.clone());
-        let to_balance = SymExpr::binop(cx, SymBinOp::Add, to_balance, value);
+        let to_balance = if saturate {
+            SymMemory::saturating_add_word(cx, to_balance, value)
+        } else {
+            SymExpr::binop(cx, SymBinOp::Add, to_balance, value)
+        };
         self.set_balance_word(from, from_balance);
         self.set_balance_word(to, to_balance);
     }
@@ -2293,7 +2324,7 @@ impl SymbolicWorld {
         if beneficiary != address && !balance.as_const().is_some_and(|value| value.is_zero()) {
             let beneficiary_balance = self.balance_word_for_address(cx, executor, beneficiary);
             let beneficiary_balance =
-                SymExpr::binop(cx, SymBinOp::Add, beneficiary_balance, balance);
+                SymMemory::saturating_add_word(cx, beneficiary_balance, balance);
             self.set_balance_word(beneficiary, beneficiary_balance);
         }
         let nonce = if self.nonces.contains_key(&address) {
@@ -2332,7 +2363,7 @@ impl SymbolicWorld {
             // Symbolic balances are treated as possibly non-zero, matching transfer's
             // account-existence approximation.
             let beneficiary_balance =
-                SymExpr::binop(cx, SymBinOp::Add, beneficiary_balance, balance);
+                SymMemory::saturating_add_word(cx, beneficiary_balance, balance);
             self.set_balance_word(beneficiary, beneficiary_balance);
             let zero = SymExpr::zero(cx);
             Arc::make_mut(&mut self.state).balances.insert(address, zero);
