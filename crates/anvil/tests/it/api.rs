@@ -1300,3 +1300,13 @@ async fn can_get_execution_witness() {
         .unwrap();
     assert_eq!(historical, witness);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn execution_witness_respects_genesis_block_number() {
+    let (api, _handle) = spawn(NodeConfig::test().with_genesis_block_number(Some(100u64))).await;
+    api.mine_one().await.unwrap();
+
+    let err = api.debug_execution_witness(BlockNumberOrTag::Number(100)).await.unwrap_err();
+    assert_eq!(err.to_string(), "genesis block has no parent state to build a witness from");
+    api.debug_execution_witness(BlockNumberOrTag::Number(101)).await.unwrap();
+}
