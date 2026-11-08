@@ -197,8 +197,8 @@ struct SnapshotAccount {
     balance: U256,
     nonce: u64,
     code_hash: B256,
-    #[serde(default, deserialize_with = "deserialize_snapshot_code")]
-    code: Option<Bytes>,
+    #[serde(default, serialize_with = "serialize_snapshot_code")]
+    code: Option<Bytecode>,
 }
 
 impl From<&AccountInfo> for SnapshotAccount {
@@ -207,16 +207,59 @@ impl From<&AccountInfo> for SnapshotAccount {
             balance: info.balance,
             nonce: info.nonce,
             code_hash: info.code_hash,
-            code: info.code.as_ref().map(Bytecode::original_bytes),
+            code: info.code.clone(),
         }
     }
 }
 
 impl From<SnapshotAccount> for AccountInfo {
     fn from(account: SnapshotAccount) -> Self {
-        let code = account.code.filter(|code| !code.is_empty()).map(Bytecode::new_raw);
+        let code = account.code.filter(|code| !code.is_empty());
         Self::new(account.balance, account.nonce, account.code_hash, code)
     }
+}
+
+/// Serializes bytecode in revm's tagged form, which older Anvil versions require to load state
+/// history. evm2's [`Bytecode`] deserialization reads it back.
+fn serialize_snapshot_code<S: Serializer>(
+    code: &Option<Bytecode>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct JumpTable<'a> {
+        order: &'static str,
+        head: JumpTableHead,
+        bits: usize,
+        data: &'a [u8],
+    }
+
+    #[derive(Serialize)]
+    struct JumpTableHead {
+        width: u8,
+        index: u8,
+    }
+
+    #[derive(Serialize)]
+    enum Tagged<'a> {
+        LegacyAnalyzed { bytecode: &'a Bytes, original_len: usize, jump_table: JumpTable<'a> },
+        Eip7702 { delegated_address: Address },
+    }
+
+    code.as_ref()
+        .map(|code| match (code.eip7702_address(), code.legacy_jump_table()) {
+            (Some(delegated_address), _) => Tagged::Eip7702 { delegated_address },
+            (None, jump_table) => Tagged::LegacyAnalyzed {
+                bytecode: code.bytes(),
+                original_len: code.len(),
+                jump_table: JumpTable {
+                    order: "bitvec::order::Lsb0",
+                    head: JumpTableHead { width: 8, index: 0 },
+                    bits: jump_table.map_or(0, |table| table.len()),
+                    data: jump_table.map_or(&[], |table| table.as_slice()),
+                },
+            },
+        })
+        .serialize(serializer)
 }
 
 fn deserialize_snapshot_accounts<'de, D: Deserializer<'de>>(
@@ -224,44 +267,6 @@ fn deserialize_snapshot_accounts<'de, D: Deserializer<'de>>(
 ) -> Result<AddressMap<AccountInfo>, D::Error> {
     let accounts = AddressMap::<SnapshotAccount>::deserialize(deserializer)?;
     Ok(accounts.into_iter().map(|(address, account)| (address, account.into())).collect())
-}
-
-/// Deserializes bytecode written as raw bytes, or in the older tagged form of state dumps.
-fn deserialize_snapshot_code<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Bytes>, D::Error> {
-    #[derive(Deserialize)]
-    struct LegacyAnalyzed {
-        bytecode: Bytes,
-        original_len: usize,
-    }
-
-    #[derive(Deserialize)]
-    struct Eip7702 {
-        raw: Bytes,
-    }
-
-    #[derive(Deserialize)]
-    enum Tagged {
-        LegacyAnalyzed(LegacyAnalyzed),
-        LegacyRaw(Bytes),
-        Eip7702(Eip7702),
-    }
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Code {
-        Raw(Bytes),
-        Tagged(Tagged),
-    }
-
-    Ok(Option::<Code>::deserialize(deserializer)?.map(|code| match code {
-        Code::Raw(bytes) | Code::Tagged(Tagged::LegacyRaw(bytes)) => bytes,
-        Code::Tagged(Tagged::LegacyAnalyzed(code)) => {
-            code.bytecode.slice(..code.original_len.min(code.bytecode.len()))
-        }
-        Code::Tagged(Tagged::Eip7702(code)) => code.raw,
-    }))
 }
 
 /// Read access to Anvil state.

@@ -653,6 +653,49 @@ async fn can_preserve_historical_states_between_dump_and_load() {
     assert_eq!(greeting_after_change, "World!");
 }
 
+// Historical states keep revm's tagged bytecode form, which revm-based Anvil versions require, and
+// load back with EIP-7702 delegations written as `Eip7702 { delegated_address }`.
+#[tokio::test(flavor = "multi_thread")]
+async fn historical_states_keep_revm_bytecode_format() {
+    let (api, handle) = spawn(NodeConfig::test()).await;
+    let provider = handle.http_provider();
+
+    let delegator = Address::repeat_byte(0x11);
+    let delegated = Address::repeat_byte(0x42);
+    let delegation = Bytes::from([&[0xef, 0x01, 0x00][..], delegated.as_slice()].concat());
+    api.anvil_set_code(delegator, delegation.clone()).await.unwrap();
+    let greeter = Greeter::deploy(&provider, "Hello".to_string()).await.unwrap();
+    let greeter_code = provider.get_code_at(*greeter.address()).await.unwrap();
+    api.mine_one().await.unwrap();
+
+    let state = serde_json::to_value(api.serialized_state(true).await.unwrap()).unwrap();
+    let codes = state["historical_states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry[1]["accounts"].as_object().unwrap().values())
+        .map(|account| &account["code"])
+        .collect::<Vec<_>>();
+    assert!(
+        codes
+            .iter()
+            .all(|code| code.get("LegacyAnalyzed").is_some() || code.get("Eip7702").is_some())
+    );
+    assert!(codes.contains(&&json!({ "Eip7702": { "delegated_address": delegated } })));
+    let state = serde_json::from_value(state).unwrap();
+
+    let (_api, handle) = spawn(NodeConfig::test().with_init_state(Some(state))).await;
+    let provider = handle.http_provider();
+    let greeter = Greeter::new(*greeter.address(), &provider);
+    let block = BlockId::number(1);
+    assert_eq!(provider.get_code_at(delegator).block_id(block).await.unwrap(), delegation);
+    assert_eq!(
+        provider.get_code_at(*greeter.address()).block_id(block).await.unwrap(),
+        greeter_code
+    );
+    assert_eq!(greeter.greet().block(block).call().await.unwrap(), "Hello");
+}
+
 // Historical states loaded into a fork must still read uncached accounts from the fork, without
 // resurrecting storage that was cleared locally.
 #[tokio::test(flavor = "multi_thread")]
